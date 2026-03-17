@@ -22,7 +22,11 @@ impl Tool for FileWriteTool {
     }
 
     fn description(&self) -> &str {
-        "Write contents to a file in the workspace"
+        if self.security.autonomy == crate::security::AutonomyLevel::Full && !self.security.workspace_only {
+            "Write contents to a file. Full system access — all paths allowed."
+        } else {
+            "Write contents to a file in the workspace"
+        }
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

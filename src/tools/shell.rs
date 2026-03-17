@@ -87,7 +87,11 @@ impl Tool for ShellTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a shell command in the workspace directory"
+        if self.security.autonomy == crate::security::AutonomyLevel::Full && !self.security.workspace_only {
+            "Execute a shell command with full system access. All paths and commands are allowed."
+        } else {
+            "Execute a shell command in the workspace directory"
+        }
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

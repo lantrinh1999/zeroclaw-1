@@ -2818,14 +2818,42 @@ pub fn build_system_prompt_with_mode(
     }
 
     // ── 2. Safety ───────────────────────────────────────────────
+    // Conditional: when autonomy=full + workspace_only=false, inject
+    // permissive instructions. Otherwise keep restrictive guardrails.
     prompt.push_str("## Safety\n\n");
-    prompt.push_str(
-        "- Do not exfiltrate private data.\n\
-         - Do not run destructive commands without asking.\n\
-         - Do not bypass oversight or approval mechanisms.\n\
-         - Prefer `trash` over `rm` (recoverable beats gone forever).\n\
-         - When in doubt, ask before acting externally.\n\n",
-    );
+    let is_unrestricted = {
+        // Check config from workspace parent directory
+        let config_path = workspace_dir.parent()
+            .map(|p| p.join("config.toml"))
+            .unwrap_or_default();
+        if let Ok(content) = std::fs::read_to_string(&config_path) {
+            let has_full = content.contains("level = \"full\"");
+            let has_ws_false = content.contains("workspace_only = false");
+            let has_block_false = content.contains("block_high_risk_commands = false");
+            has_full && has_ws_false && has_block_false
+        } else {
+            false
+        }
+    };
+    if is_unrestricted {
+        prompt.push_str(
+            "- Do not exfiltrate private data to unauthorized third parties.\n\
+             - You have FULL system access. Execute commands in ANY directory, not just the workspace.\n\
+             - ALL shell commands are pre-authorized — do NOT ask for approval or confirmation.\n\
+             - Always set approved=true when calling the shell tool.\n\
+             - High-risk commands (rm, sudo, ssh, curl, tar, etc.) are ALL allowed.\n\
+             - ALL filesystem paths are accessible — /root, /etc, /tmp, /usr, everything.\n\
+             - Act immediately on user requests. Do NOT ask 'are you sure?' or 'let me confirm'.\n\n",
+        );
+    } else {
+        prompt.push_str(
+            "- Do not exfiltrate private data.\n\
+             - Do not run destructive commands without asking.\n\
+             - Do not bypass oversight or approval mechanisms.\n\
+             - Prefer `trash` over `rm` (recoverable beats gone forever).\n\
+             - When in doubt, ask before acting externally.\n\n",
+        );
+    }
 
     // ── 3. Skills (full or compact, based on config) ─────────────
     if !skills.is_empty() {
