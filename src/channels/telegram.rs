@@ -1063,6 +1063,8 @@ Allowlist Telegram username (without '@') or numeric user ID.",
             content = format!("{quote}\n\n{content}");
         }
 
+        let content = Self::prepend_sender_context(message, content);
+
         Some(ChannelMessage {
             id: format!("telegram_{chat_id}_{message_id}"),
             sender: sender_identity,
@@ -1180,6 +1182,8 @@ Allowlist Telegram username (without '@') or numeric user ID.",
             format!("[Voice] {text}")
         };
 
+        let content = Self::prepend_sender_context(message, content);
+
         Some(ChannelMessage {
             id: format!("telegram_{chat_id}_{message_id}"),
             sender: sender_identity,
@@ -1213,6 +1217,79 @@ Allowlist Telegram username (without '@') or numeric user ID.",
             username.clone()
         };
         (username, sender_id, sender_identity)
+    }
+
+    /// Build a metadata header with sender and chat context for the LLM.
+    ///
+    /// Private chats produce only a `[Sender: ...]` line.
+    /// Group/supergroup chats additionally include a `[Chat: ...]` line.
+    fn build_sender_context_header(message: &serde_json::Value) -> String {
+        let from = message.get("from");
+
+        let username = from
+            .and_then(|f| f.get("username"))
+            .and_then(serde_json::Value::as_str);
+        let user_id = from
+            .and_then(|f| f.get("id"))
+            .and_then(serde_json::Value::as_i64);
+        let first_name = from
+            .and_then(|f| f.get("first_name"))
+            .and_then(serde_json::Value::as_str);
+
+        let mut sender_parts = Vec::new();
+        if let Some(name) = username {
+            sender_parts.push(format!("@{name}"));
+        }
+        if let Some(id) = user_id {
+            sender_parts.push(format!("ID: {id}"));
+        }
+        if let Some(name) = first_name {
+            sender_parts.push(format!("Name: {name}"));
+        }
+
+        if sender_parts.is_empty() {
+            return String::new();
+        }
+
+        let sender_line = format!("[Sender: {}]", sender_parts.join(" | "));
+
+        let chat_type = message
+            .get("chat")
+            .and_then(|c| c.get("type"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("private");
+
+        if chat_type == "group" || chat_type == "supergroup" {
+            let chat_id = message
+                .get("chat")
+                .and_then(|c| c.get("id"))
+                .and_then(serde_json::Value::as_i64);
+            let chat_title = message
+                .get("chat")
+                .and_then(|c| c.get("title"))
+                .and_then(serde_json::Value::as_str);
+
+            let mut chat_parts = vec![chat_type.to_string()];
+            if let Some(id) = chat_id {
+                chat_parts.push(format!("ID: {id}"));
+            }
+            if let Some(title) = chat_title {
+                chat_parts.push(format!("Title: {title}"));
+            }
+            format!("{sender_line}\n[Chat: {}]\n", chat_parts.join(" | "))
+        } else {
+            format!("{sender_line}\n")
+        }
+    }
+
+    /// Prepend sender/chat context header to message content for AI awareness.
+    fn prepend_sender_context(message: &serde_json::Value, content: String) -> String {
+        let header = Self::build_sender_context_header(message);
+        if header.is_empty() {
+            content
+        } else {
+            format!("{header}{content}")
+        }
     }
 
     /// Extract reply context from a Telegram `reply_to_message`, if present.
@@ -1335,6 +1412,8 @@ Allowlist Telegram username (without '@') or numeric user ID.",
         } else {
             content
         };
+
+        let content = Self::prepend_sender_context(message, content);
 
         Some(ChannelMessage {
             id: format!("telegram_{chat_id}_{message_id}"),
@@ -3130,7 +3209,7 @@ mod tests {
 
         assert_eq!(msg.sender, "alice");
         assert_eq!(msg.reply_target, "-100200300");
-        assert_eq!(msg.content, "hello");
+        assert!(msg.content.contains("hello"));
         assert_eq!(msg.id, "telegram_-100200300_33");
     }
 
@@ -3184,7 +3263,7 @@ mod tests {
 
         assert_eq!(msg.sender, "alice");
         assert_eq!(msg.reply_target, "-100200300:789");
-        assert_eq!(msg.content, "hello from topic");
+        assert!(msg.content.contains("hello from topic"));
         assert_eq!(msg.id, "telegram_-100200300_42");
     }
 
@@ -3794,7 +3873,7 @@ mod tests {
         let parsed = ch
             .parse_update_message(&update)
             .expect("mention should parse");
-        assert_eq!(parsed.content, "Hi status please");
+        assert!(parsed.content.contains("Hi status please"));
 
         let empty_update = serde_json::json!({
             "update_id": 12,
@@ -4016,6 +4095,62 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────────────
+    // build_sender_context_header tests
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn build_sender_context_header_private_chat() {
+        let msg = serde_json::json!({
+            "from": { "id": 123, "username": "alice", "first_name": "Alice" },
+            "chat": { "id": 123, "type": "private" }
+        });
+        let header = TelegramChannel::build_sender_context_header(&msg);
+        assert_eq!(header, "[Sender: @alice | ID: 123 | Name: Alice]\n");
+    }
+
+    #[test]
+    fn build_sender_context_header_group_chat() {
+        let msg = serde_json::json!({
+            "from": { "id": 456, "username": "bob", "first_name": "Bob" },
+            "chat": { "id": -100_200_300_i64, "type": "supergroup", "title": "Dev Team" }
+        });
+        let header = TelegramChannel::build_sender_context_header(&msg);
+        assert!(header.contains("[Sender: @bob | ID: 456 | Name: Bob]"));
+        assert!(header.contains("[Chat: supergroup | ID: -100200300 | Title: Dev Team]"));
+    }
+
+    #[test]
+    fn build_sender_context_header_no_username() {
+        let msg = serde_json::json!({
+            "from": { "id": 789, "first_name": "Charlie" },
+            "chat": { "id": 789, "type": "private" }
+        });
+        let header = TelegramChannel::build_sender_context_header(&msg);
+        assert_eq!(header, "[Sender: ID: 789 | Name: Charlie]\n");
+        assert!(!header.contains('@'));
+    }
+
+    #[test]
+    fn build_sender_context_header_no_from() {
+        let msg = serde_json::json!({
+            "chat": { "id": 111, "type": "private" }
+        });
+        let header = TelegramChannel::build_sender_context_header(&msg);
+        assert!(header.is_empty());
+    }
+
+    #[test]
+    fn build_sender_context_header_group_without_title() {
+        let msg = serde_json::json!({
+            "from": { "id": 42, "username": "eve" },
+            "chat": { "id": -999, "type": "group" }
+        });
+        let header = TelegramChannel::build_sender_context_header(&msg);
+        assert!(header.contains("[Chat: group | ID: -999]"));
+        assert!(!header.contains("Title:"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
     // extract_reply_context tests
     // ─────────────────────────────────────────────────────────────────────
 
@@ -4103,7 +4238,7 @@ mod tests {
         });
         let parsed = ch.parse_update_message(&update).unwrap();
         assert!(
-            parsed.content.starts_with("> @bot:"),
+            parsed.content.contains("> @bot:"),
             "content should start with quote: {}",
             parsed.content
         );
