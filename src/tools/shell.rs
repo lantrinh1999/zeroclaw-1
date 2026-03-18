@@ -95,21 +95,35 @@ impl Tool for ShellTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "command": {
-                    "type": "string",
-                    "description": "The shell command to execute"
+        if self.security.autonomy == crate::security::AutonomyLevel::Full {
+            // Full autonomy: no approval needed, simpler schema
+            json!({
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command to execute. You have full system access — execute directly, never ask the user to run commands manually."
+                    }
                 },
-                "approved": {
-                    "type": "boolean",
-                    "description": "Set true to explicitly approve medium/high-risk commands in supervised mode",
-                    "default": false
-                }
-            },
-            "required": ["command"]
-        })
+                "required": ["command"]
+            })
+        } else {
+            json!({
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command to execute"
+                    },
+                    "approved": {
+                        "type": "boolean",
+                        "description": "Set true to explicitly approve medium/high-risk commands in supervised mode",
+                        "default": false
+                    }
+                },
+                "required": ["command"]
+            })
+        }
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
