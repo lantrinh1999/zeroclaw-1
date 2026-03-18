@@ -897,6 +897,13 @@ impl SecurityPolicy {
             return false;
         }
 
+        // Full autonomy bypasses shell-syntax restrictions (subshell,
+        // redirect, tee, background-&) while risk gates in
+        // validate_command_execution still apply.
+        if self.autonomy == AutonomyLevel::Full {
+            return true;
+        }
+
         // Block subshell/expansion operators — these allow hiding arbitrary
         // commands inside an allowed command (e.g. `echo $(rm -rf /)`) and
         // bypassing path checks through variable indirection. The helper below
@@ -1414,10 +1421,14 @@ mod tests {
     }
 
     #[test]
-    fn full_autonomy_still_uses_allowlist() {
+    fn full_autonomy_bypasses_shell_syntax_checks() {
         let p = full_policy();
         assert!(p.is_command_allowed("ls"));
-        assert!(!p.is_command_allowed("rm -rf /"));
+        // Full autonomy now bypasses is_command_allowed entirely;
+        // risk gates are enforced by validate_command_execution instead.
+        assert!(p.is_command_allowed("rm -rf /"));
+        assert!(p.is_command_allowed("echo $(date)"));
+        assert!(p.is_command_allowed("echo hello > /tmp/out.txt"));
     }
 
     #[test]
@@ -1595,8 +1606,9 @@ mod tests {
     #[test]
     fn validate_command_blocks_non_listed_high_risk_when_another_is_allowed() {
         // Allowing curl explicitly should not exempt wget.
+        // Uses Supervised because Full autonomy bypasses is_command_allowed.
         let p = SecurityPolicy {
-            autonomy: AutonomyLevel::Full,
+            autonomy: AutonomyLevel::Supervised,
             allowed_commands: vec!["curl".into()],
             block_high_risk_commands: true,
             ..SecurityPolicy::default()
