@@ -83,6 +83,12 @@ nanohtml2text = "0.2"
 # Optional Rust-native browser automation backend
 fantoccini = { version = "0.22.1", optional = true, default-features = false, features = ["rustls-tls"] }
 
+# Progress bars (update pipeline)
+indicatif = "0.17"
+
+# Temp files (update pipeline rollback)
+tempfile = "3.26"
+
 # Error handling
 anyhow = "1.0"
 thiserror = "2.0"
@@ -184,6 +190,9 @@ probe-rs = { version = "0.31", optional = true }
 # PDF extraction for datasheet RAG (optional, enable with --features rag-pdf)
 pdf-extract = { version = "0.10", optional = true }
 
+# WASM plugin runtime (extism)
+extism = { version = "1.9", optional = true }
+
 # Terminal QR rendering for WhatsApp Web pairing flow.
 qrcode = { version = "0.14", optional = true }
 
@@ -233,6 +242,8 @@ probe = ["dep:probe-rs"]
 rag-pdf = ["dep:pdf-extract"]
 # whatsapp-web = Native WhatsApp Web client with custom rusqlite storage backend
 whatsapp-web = ["dep:wa-rs", "dep:wa-rs-core", "dep:wa-rs-binary", "dep:wa-rs-proto", "dep:wa-rs-ureq-http", "dep:wa-rs-tokio-transport", "dep:serde-big-array", "dep:prost", "dep:qrcode"]
+# WASM plugin system (extism-based)
+plugins-wasm = ["dep:extism"]
 
 [profile.release]
 opt-level = "z"      # Optimize for size
