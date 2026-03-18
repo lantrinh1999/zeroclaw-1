@@ -3087,7 +3087,7 @@ pub async fn run(
     } else {
         (None, None)
     };
-    let (mut tools_registry, delegate_handle) = tools::all_tools_with_runtime(
+    let (mut tools_registry, delegate_handle, spawn_manager) = tools::all_tools_with_runtime(
         Arc::new(config.clone()),
         &security,
         runtime,
@@ -3221,6 +3221,30 @@ pub async fn run(
         &provider_runtime_options,
     )?;
 
+    // Spawn CLI completion listener for background subagent results.
+    if let Some(ref sm) = spawn_manager {
+        let mut rx = sm.subscribe_completions();
+        tokio::spawn(async move {
+            while let Ok(completion) = rx.recv().await {
+                let status_emoji = if completion.status == crate::tools::SubagentStatus::Completed {
+                    "✅"
+                } else {
+                    "❌"
+                };
+                let label_part = if completion.label.is_empty() {
+                    String::new()
+                } else {
+                    format!(" \"{}\"", completion.label)
+                };
+                println!(
+                    "\n{status_emoji} Spawn{label_part} ({}):\n{}\n",
+                    completion.status,
+                    completion.result,
+                );
+            }
+        });
+    }
+
     observer.record_event(&ObserverEvent::AgentStart {
         provider: provider_name.to_string(),
         model: model_name.to_string(),
@@ -3324,6 +3348,14 @@ pub async fn run(
         tool_descs.push((
             "delegate",
             "Delegate a sub-task to a specialized agent. Use when: task needs different model/capability, or to parallelize work.",
+        ));
+        tool_descs.push((
+            "spawn",
+            "Spawn a subagent or jobs to handle a task. By default waits and returns result inline. Set wait=false for fire-and-forget background mode (check with spawn_status later). Use when: complex tasks needing a different agent/model.",
+        ));
+        tool_descs.push((
+            "spawn_status",
+            "Check status and results of spawned background subagents. Use when: checking progress of spawned tasks, retrieving results. Without arguments lists all tasks; with task_id shows specific task detail.",
         ));
     }
     if config.peripherals.enabled && !config.peripherals.boards.is_empty() {
@@ -3715,7 +3747,7 @@ pub async fn process_message(
     } else {
         (None, None)
     };
-    let (mut tools_registry, delegate_handle_pm) = tools::all_tools_with_runtime(
+    let (mut tools_registry, delegate_handle_pm, _spawn_manager_pm) = tools::all_tools_with_runtime(
         Arc::new(config.clone()),
         &security,
         runtime,

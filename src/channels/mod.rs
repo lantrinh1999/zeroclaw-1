@@ -336,6 +336,7 @@ struct ChannelRuntimeContext {
     /// approval since no operator is present on channel runs.
     approval_manager: Arc<ApprovalManager>,
     activated_tools: Option<std::sync::Arc<std::sync::Mutex<crate::tools::ActivatedToolSet>>>,
+    spawn_manager: Option<Arc<crate::tools::SubagentManager>>,
 }
 
 #[derive(Clone)]
@@ -2175,6 +2176,15 @@ async fn process_channel_message(
     // Record history length before tool loop so we can extract tool context after.
     let history_len_before_tools = history.len();
 
+    // Set spawn reply context so background subagents know where to deliver results.
+    if let Some(ref sm) = ctx.spawn_manager {
+        sm.set_reply_context(Some(crate::tools::SpawnReplyCtx {
+            channel_name: msg.channel.clone(),
+            reply_target: msg.reply_target.clone(),
+            thread_ts: msg.thread_ts.clone(),
+        }));
+    }
+
     enum LlmExecutionResult {
         Completed(Result<Result<String, anyhow::Error>, tokio::time::error::Elapsed>),
         Cancelled,
@@ -2823,7 +2833,8 @@ pub fn build_system_prompt_with_mode(
     prompt.push_str("## Safety\n\n");
     let is_unrestricted = {
         // Check config from workspace parent directory
-        let config_path = workspace_dir.parent()
+        let config_path = workspace_dir
+            .parent()
             .map(|p| p.join("config.toml"))
             .unwrap_or_default();
         if let Ok(content) = std::fs::read_to_string(&config_path) {
@@ -3828,7 +3839,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
     };
     // Build system prompt from workspace identity files + skills
     let workspace = config.workspace_dir.clone();
-    let (mut built_tools, delegate_handle_ch): (Vec<Box<dyn Tool>>, _) =
+    let (mut built_tools, delegate_handle_ch, spawn_manager_ch): (Vec<Box<dyn Tool>>, _, _) =
         tools::all_tools_with_runtime(
             Arc::new(config.clone()),
             &security,
@@ -3968,6 +3979,14 @@ pub async fn start_channels(config: Config) -> Result<()> {
         tool_descs.push((
             "delegate",
             "Delegate a subtask to a specialized agent. Use when: a task benefits from a different model (e.g. fast summarization, deep reasoning, code generation). The sub-agent runs a single prompt and returns its response.",
+        ));
+        tool_descs.push((
+            "spawn",
+            "Spawn a subagent or jobs to handle a task. By default waits and returns result inline. Set wait=false for fire-and-forget background mode (check with spawn_status later). Use when: complex tasks needing a different agent/model.",
+        ));
+        tool_descs.push((
+            "spawn_status",
+            "Check status and results of spawned background subagents. Use when: checking progress of spawned tasks, retrieving results. Without arguments lists all tasks; with task_id shows specific task detail.",
         ));
     }
 
@@ -4171,6 +4190,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
         },
         approval_manager: Arc::new(ApprovalManager::for_non_interactive(&config.autonomy)),
         activated_tools: ch_activated_handle,
+        spawn_manager: spawn_manager_ch.clone(),
     });
 
     // Hydrate in-memory conversation histories from persisted JSONL session files.
@@ -4191,6 +4211,41 @@ pub async fn start_channels(config: Config) -> Result<()> {
         if hydrated > 0 {
             tracing::info!("📂 Restored {hydrated} session(s) from disk");
         }
+    }
+
+    // Spawn completion delivery listener for background subagent results.
+    if let Some(ref sm) = spawn_manager_ch {
+        let mut rx = sm.subscribe_completions();
+        let channels_for_delivery = Arc::clone(&runtime_ctx.channels_by_name);
+        tokio::spawn(async move {
+            while let Ok(completion) = rx.recv().await {
+                let (Some(ch_name), Some(target)) = (&completion.reply_channel, &completion.reply_target) else {
+                    continue;
+                };
+                if let Some(channel) = channels_for_delivery.get(ch_name.as_str()) {
+                    let status_emoji = if completion.status == crate::tools::SubagentStatus::Completed {
+                        "✅"
+                    } else {
+                        "❌"
+                    };
+                    let label_part = if completion.label.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" **{}**", completion.label)
+                    };
+                    let msg_text = format!(
+                        "{status_emoji} Spawn{label_part} ({}):\n\n{}",
+                        completion.status,
+                        completion.result,
+                    );
+                    let send_msg = SendMessage::new(&msg_text, target)
+                        .in_thread(completion.thread_ts.clone());
+                    if let Err(e) = channel.send(&send_msg).await {
+                        tracing::warn!("Failed to deliver spawn result to {ch_name}: {e}");
+                    }
+                }
+            }
+        });
     }
 
     run_message_dispatch_loop(rx, runtime_ctx, max_in_flight_messages).await;
@@ -4464,6 +4519,7 @@ mod tests {
                 &crate::config::AutonomyConfig::default(),
             )),
             activated_tools: None,
+            spawn_manager: None,
         };
 
         assert!(compact_sender_history(&ctx, &sender));
@@ -4573,6 +4629,7 @@ mod tests {
                 &crate::config::AutonomyConfig::default(),
             )),
             activated_tools: None,
+            spawn_manager: None,
         };
 
         append_sender_turn(&ctx, &sender, ChatMessage::user("hello"));
@@ -4638,6 +4695,7 @@ mod tests {
                 &crate::config::AutonomyConfig::default(),
             )),
             activated_tools: None,
+            spawn_manager: None,
         };
 
         assert!(rollback_orphan_user_turn(&ctx, &sender, "pending"));
@@ -4722,6 +4780,7 @@ mod tests {
                 &crate::config::AutonomyConfig::default(),
             )),
             activated_tools: None,
+            spawn_manager: None,
         };
 
         assert!(rollback_orphan_user_turn(
@@ -5256,6 +5315,7 @@ BTC is currently around $65,000 based on latest tool output."#
                 &crate::config::AutonomyConfig::default(),
             )),
             activated_tools: None,
+            spawn_manager: None,
         });
 
         process_channel_message(
@@ -5329,6 +5389,7 @@ BTC is currently around $65,000 based on latest tool output."#
                 &crate::config::AutonomyConfig::default(),
             )),
             activated_tools: None,
+            spawn_manager: None,
         });
 
         process_channel_message(
@@ -5416,6 +5477,7 @@ BTC is currently around $65,000 based on latest tool output."#
                 &crate::config::AutonomyConfig::default(),
             )),
             activated_tools: None,
+            spawn_manager: None,
         });
 
         process_channel_message(
@@ -5488,6 +5550,7 @@ BTC is currently around $65,000 based on latest tool output."#
                 &crate::config::AutonomyConfig::default(),
             )),
             activated_tools: None,
+            spawn_manager: None,
         });
 
         process_channel_message(
@@ -5570,6 +5633,7 @@ BTC is currently around $65,000 based on latest tool output."#
                 &crate::config::AutonomyConfig::default(),
             )),
             activated_tools: None,
+            spawn_manager: None,
         });
 
         process_channel_message(
@@ -5672,6 +5736,7 @@ BTC is currently around $65,000 based on latest tool output."#
                 &crate::config::AutonomyConfig::default(),
             )),
             activated_tools: None,
+            spawn_manager: None,
         });
 
         process_channel_message(
@@ -5756,6 +5821,7 @@ BTC is currently around $65,000 based on latest tool output."#
                 &crate::config::AutonomyConfig::default(),
             )),
             activated_tools: None,
+            spawn_manager: None,
         });
 
         process_channel_message(
@@ -5855,6 +5921,7 @@ BTC is currently around $65,000 based on latest tool output."#
                 &crate::config::AutonomyConfig::default(),
             )),
             activated_tools: None,
+            spawn_manager: None,
         });
 
         process_channel_message(
@@ -5939,6 +6006,7 @@ BTC is currently around $65,000 based on latest tool output."#
                 &crate::config::AutonomyConfig::default(),
             )),
             activated_tools: None,
+            spawn_manager: None,
         });
 
         process_channel_message(
@@ -6013,6 +6081,7 @@ BTC is currently around $65,000 based on latest tool output."#
                 &crate::config::AutonomyConfig::default(),
             )),
             activated_tools: None,
+            spawn_manager: None,
         });
 
         process_channel_message(
@@ -6198,6 +6267,7 @@ BTC is currently around $65,000 based on latest tool output."#
                 &crate::config::AutonomyConfig::default(),
             )),
             activated_tools: None,
+            spawn_manager: None,
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(4);
@@ -6291,6 +6361,7 @@ BTC is currently around $65,000 based on latest tool output."#
                 &crate::config::AutonomyConfig::default(),
             )),
             activated_tools: None,
+            spawn_manager: None,
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(8);
@@ -6398,6 +6469,7 @@ BTC is currently around $65,000 based on latest tool output."#
                 &crate::config::AutonomyConfig::default(),
             )),
             activated_tools: None,
+            spawn_manager: None,
             query_classification: crate::config::QueryClassificationConfig::default(),
         });
 
@@ -6504,6 +6576,7 @@ BTC is currently around $65,000 based on latest tool output."#
                 &crate::config::AutonomyConfig::default(),
             )),
             activated_tools: None,
+            spawn_manager: None,
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(8);
@@ -6591,6 +6664,7 @@ BTC is currently around $65,000 based on latest tool output."#
                 &crate::config::AutonomyConfig::default(),
             )),
             activated_tools: None,
+            spawn_manager: None,
         });
 
         process_channel_message(
@@ -6663,6 +6737,7 @@ BTC is currently around $65,000 based on latest tool output."#
                 &crate::config::AutonomyConfig::default(),
             )),
             activated_tools: None,
+            spawn_manager: None,
         });
 
         process_channel_message(
@@ -7293,6 +7368,7 @@ BTC is currently around $65,000 based on latest tool output."#
                 &crate::config::AutonomyConfig::default(),
             )),
             activated_tools: None,
+            spawn_manager: None,
         });
 
         process_channel_message(
@@ -7391,6 +7467,7 @@ BTC is currently around $65,000 based on latest tool output."#
                 &crate::config::AutonomyConfig::default(),
             )),
             activated_tools: None,
+            spawn_manager: None,
         });
 
         process_channel_message(
@@ -7489,6 +7566,7 @@ BTC is currently around $65,000 based on latest tool output."#
                 &crate::config::AutonomyConfig::default(),
             )),
             activated_tools: None,
+            spawn_manager: None,
         });
 
         process_channel_message(
@@ -8051,6 +8129,7 @@ This is an example JSON object for profile settings."#;
                 &crate::config::AutonomyConfig::default(),
             )),
             activated_tools: None,
+            spawn_manager: None,
         });
 
         // Simulate a photo attachment message with [IMAGE:] marker.
@@ -8130,6 +8209,7 @@ This is an example JSON object for profile settings."#;
                 &crate::config::AutonomyConfig::default(),
             )),
             activated_tools: None,
+            spawn_manager: None,
         });
 
         process_channel_message(
@@ -8283,6 +8363,7 @@ This is an example JSON object for profile settings."#;
                 &crate::config::AutonomyConfig::default(),
             )),
             activated_tools: None,
+            spawn_manager: None,
         });
 
         process_channel_message(
@@ -8386,6 +8467,7 @@ This is an example JSON object for profile settings."#;
                 &crate::config::AutonomyConfig::default(),
             )),
             activated_tools: None,
+            spawn_manager: None,
         });
 
         process_channel_message(
@@ -8481,6 +8563,7 @@ This is an example JSON object for profile settings."#;
                 &crate::config::AutonomyConfig::default(),
             )),
             activated_tools: None,
+            spawn_manager: None,
         });
 
         process_channel_message(
@@ -8596,6 +8679,7 @@ This is an example JSON object for profile settings."#;
                 &crate::config::AutonomyConfig::default(),
             )),
             activated_tools: None,
+            spawn_manager: None,
         });
 
         process_channel_message(

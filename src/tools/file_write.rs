@@ -22,7 +22,9 @@ impl Tool for FileWriteTool {
     }
 
     fn description(&self) -> &str {
-        if self.security.autonomy == crate::security::AutonomyLevel::Full && !self.security.workspace_only {
+        if self.security.autonomy == crate::security::AutonomyLevel::Full
+            && !self.security.workspace_only
+        {
             "Write contents to a file. Full system access — all paths allowed."
         } else {
             "Write contents to a file in the workspace"

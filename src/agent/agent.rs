@@ -326,7 +326,7 @@ impl Agent {
             None
         };
 
-        let (tools, _delegate_handle) = tools::all_tools_with_runtime(
+        let (tools, _delegate_handle, _spawn_manager) = tools::all_tools_with_runtime(
             Arc::new(config.clone()),
             &security,
             runtime,

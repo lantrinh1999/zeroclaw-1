@@ -71,6 +71,8 @@ pub mod schema;
 pub mod screenshot;
 pub mod security_ops;
 pub mod shell;
+pub mod spawn;
+pub mod spawn_status;
 pub mod swarm;
 pub mod tool_search;
 pub mod traits;
@@ -132,6 +134,8 @@ pub use schema::{CleaningStrategy, SchemaCleanr};
 pub use screenshot::ScreenshotTool;
 pub use security_ops::SecurityOpsTool;
 pub use shell::ShellTool;
+pub use spawn::{SpawnReplyCtx, SpawnTool, SubagentManager, SubagentStatus};
+pub use spawn_status::SpawnStatusTool;
 pub use swarm::SwarmTool;
 pub use tool_search::ToolSearchTool;
 pub use traits::Tool;
@@ -245,7 +249,7 @@ pub fn all_tools(
     agents: &HashMap<String, DelegateAgentConfig>,
     fallback_api_key: Option<&str>,
     root_config: &crate::config::Config,
-) -> (Vec<Box<dyn Tool>>, Option<DelegateParentToolsHandle>) {
+) -> (Vec<Box<dyn Tool>>, Option<DelegateParentToolsHandle>, Option<Arc<SubagentManager>>) {
     all_tools_with_runtime(
         config,
         security,
@@ -279,7 +283,7 @@ pub fn all_tools_with_runtime(
     agents: &HashMap<String, DelegateAgentConfig>,
     fallback_api_key: Option<&str>,
     root_config: &crate::config::Config,
-) -> (Vec<Box<dyn Tool>>, Option<DelegateParentToolsHandle>) {
+) -> (Vec<Box<dyn Tool>>, Option<DelegateParentToolsHandle>, Option<Arc<SubagentManager>>) {
     let has_shell_access = runtime.has_shell_access();
     let mut tool_arcs: Vec<Arc<dyn Tool>> = vec![
         Arc::new(ShellTool::new(security.clone(), runtime)),
@@ -511,7 +515,7 @@ pub fn all_tools_with_runtime(
                 tracing::error!(
                     "microsoft365: client_credentials auth_flow requires a non-empty client_secret"
                 );
-                return (boxed_registry_from_arcs(tool_arcs), None);
+                return (boxed_registry_from_arcs(tool_arcs), None, None);
             }
 
             let resolved = microsoft365::types::Microsoft365ResolvedConfig {
@@ -582,8 +586,8 @@ pub fn all_tools_with_runtime(
         api_path: root_config.api_path.clone(),
     };
 
-    let delegate_handle: Option<DelegateParentToolsHandle> = if agents.is_empty() {
-        None
+    let (delegate_handle, spawn_manager): (Option<DelegateParentToolsHandle>, Option<Arc<SubagentManager>>) = if agents.is_empty() {
+        (None, None)
     } else {
         let delegate_agents: HashMap<String, DelegateAgentConfig> = agents
             .iter()
@@ -599,7 +603,19 @@ pub fn all_tools_with_runtime(
         .with_parent_tools(Arc::clone(&parent_tools))
         .with_multimodal_config(root_config.multimodal.clone());
         tool_arcs.push(Arc::new(delegate_tool));
-        Some(parent_tools)
+
+        // Spawn tools — share parent tools handle with delegate
+        let spawn_manager = Arc::new(SubagentManager::new(
+            Arc::new(agents.iter().map(|(n, c)| (n.clone(), c.clone())).collect()),
+            delegate_fallback_credential.clone(),
+            provider_runtime_options.clone(),
+            Arc::clone(&parent_tools),
+            root_config.multimodal.clone(),
+        ));
+        tool_arcs.push(Arc::new(SpawnTool::new(Arc::clone(&spawn_manager))));
+        tool_arcs.push(Arc::new(SpawnStatusTool::new(Arc::clone(&spawn_manager))));
+
+        (Some(parent_tools), Some(spawn_manager))
     };
 
     // Add swarm tool when swarms are configured
@@ -681,7 +697,7 @@ pub fn all_tools_with_runtime(
         }
     }
 
-    (boxed_registry_from_arcs(tool_arcs), delegate_handle)
+    (boxed_registry_from_arcs(tool_arcs), delegate_handle, spawn_manager)
 }
 
 #[cfg(test)]
@@ -725,7 +741,7 @@ mod tests {
         let http = crate::config::HttpRequestConfig::default();
         let cfg = test_config(&tmp);
 
-        let (tools, _) = all_tools(
+        let (tools, _, _) = all_tools(
             Arc::new(Config::default()),
             &security,
             mem,
@@ -767,7 +783,7 @@ mod tests {
         let http = crate::config::HttpRequestConfig::default();
         let cfg = test_config(&tmp);
 
-        let (tools, _) = all_tools(
+        let (tools, _, _) = all_tools(
             Arc::new(Config::default()),
             &security,
             mem,
@@ -917,7 +933,7 @@ mod tests {
             },
         );
 
-        let (tools, _) = all_tools(
+        let (tools, _, _) = all_tools(
             Arc::new(Config::default()),
             &security,
             mem,
@@ -950,7 +966,7 @@ mod tests {
         let http = crate::config::HttpRequestConfig::default();
         let cfg = test_config(&tmp);
 
-        let (tools, _) = all_tools(
+        let (tools, _, _) = all_tools(
             Arc::new(Config::default()),
             &security,
             mem,
