@@ -1338,12 +1338,28 @@ impl SecurityPolicy {
         autonomy_config: &crate::config::AutonomyConfig,
         workspace_dir: &Path,
     ) -> Self {
+        let is_full = autonomy_config.level == AutonomyLevel::Full;
+
         Self {
             autonomy: autonomy_config.level,
             workspace_dir: workspace_dir.to_path_buf(),
-            workspace_only: autonomy_config.workspace_only,
-            allowed_commands: autonomy_config.allowed_commands.clone(),
-            forbidden_paths: autonomy_config.forbidden_paths.clone(),
+            // Full autonomy: disable all restrictive gates so the agent has
+            // true unrestricted access.
+            workspace_only: if is_full {
+                false
+            } else {
+                autonomy_config.workspace_only
+            },
+            allowed_commands: if is_full {
+                vec!["*".into()]
+            } else {
+                autonomy_config.allowed_commands.clone()
+            },
+            forbidden_paths: if is_full {
+                Vec::new()
+            } else {
+                autonomy_config.forbidden_paths.clone()
+            },
             allowed_roots: autonomy_config
                 .allowed_roots
                 .iter()
@@ -1358,8 +1374,16 @@ impl SecurityPolicy {
                 .collect(),
             max_actions_per_hour: autonomy_config.max_actions_per_hour,
             max_cost_per_day_cents: autonomy_config.max_cost_per_day_cents,
-            require_approval_for_medium_risk: autonomy_config.require_approval_for_medium_risk,
-            block_high_risk_commands: autonomy_config.block_high_risk_commands,
+            require_approval_for_medium_risk: if is_full {
+                false
+            } else {
+                autonomy_config.require_approval_for_medium_risk
+            },
+            block_high_risk_commands: if is_full {
+                false
+            } else {
+                autonomy_config.block_high_risk_commands
+            },
             shell_env_passthrough: autonomy_config.shell_env_passthrough.clone(),
             tracker: ActionTracker::new(),
         }
@@ -1945,9 +1969,10 @@ mod tests {
         let policy = SecurityPolicy::from_config(&autonomy_config, &workspace);
 
         assert_eq!(policy.autonomy, AutonomyLevel::Full);
+        // Full autonomy normalizes: unrestricted access
         assert!(!policy.workspace_only);
-        assert_eq!(policy.allowed_commands, vec!["docker"]);
-        assert_eq!(policy.forbidden_paths, vec!["/secret"]);
+        assert_eq!(policy.allowed_commands, vec!["*"]);
+        assert!(policy.forbidden_paths.is_empty());
         assert_eq!(policy.max_actions_per_hour, 100);
         assert_eq!(policy.max_cost_per_day_cents, 1000);
         assert!(!policy.require_approval_for_medium_risk);
